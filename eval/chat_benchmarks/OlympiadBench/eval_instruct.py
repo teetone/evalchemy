@@ -2,7 +2,6 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
-import numpy as np
 from lm_eval.api.instance import Instance
 from lm_eval.api.model import LM
 from lm_eval.tasks.hendrycks_math.utils import is_equiv, last_boxed_only_string, remove_boxed
@@ -45,7 +44,6 @@ class OlympiadBenchBenchmark(BaseBenchmark):
         self.debug = debug
         self.max_new_tokens = max_tokens
         self.seed = seed
-        self.n_repeat = 1
 
     def generate_responses(self, model: LM) -> Dict[str, Any]:
         """
@@ -59,56 +57,44 @@ class OlympiadBenchBenchmark(BaseBenchmark):
             or None for non-primary ranks
         """
         examples = self.load_questions()
+
         # Prepare instances for model
-        all_outputs = []
+        all_instances = []
+        for idx, example in enumerate(examples):
+            messages = [
+                {"role": "user", "content": PROMPT.format(problem=example["problem"])},
+            ]
 
-        for i in range(self.n_repeat):
-            all_instances = []
-            seed = [s + i for s in self.seed]
+            templated_messages = self._prepare_messages(messages, model)
 
-            for idx, example in enumerate(examples):
-                messages = [
-                    {"role": "user", "content": PROMPT.format(problem=example["problem"])},
-                ]
+            instance = Instance(
+                "generate_until",
+                example,
+                (
+                    templated_messages,
+                    {
+                        "do_sample": False,
+                        "max_new_tokens": self.max_new_tokens,
+                        "temperature": 0.7,
+                        "seed": self.seed,
+                    },
+                ),
+                idx,
+            )
 
-                templated_messages = self._prepare_messages(messages, model)
+            all_instances.append(instance)
 
-                instance = Instance(
-                    "generate_until",
-                    example,
-                    (
-                        templated_messages,
-                        {
-                            "do_sample": False,
-                            "max_new_tokens": self.max_new_tokens,
-                            "temperature": 0.7,
-                            "seed": seed,
-                        },
-                    ),
-                    idx,
-                )
+        # Generate model responses
+        self.logger.info("Generating responses for OlympiadBench...")
+        outputs = self.compute(model, all_instances)
 
-                # Add repetition information to instance metadata
-                instance.repeat_idx = i
-                instance.metadata = {
-                    "problem_id": str(example["id"]) if "id" in example else str(idx),
-                    "expected_answer": str(example["answer"]),
-                    "reference_solution": str(example["solution"]) if "solution" in example else "",
-                }
-
-                all_instances.append(instance)
-
-            # Generate model responses
-            self.logger.info("Generating responses for OlympiadBench...")
-            outputs = self.compute(model, all_instances)
-            all_outputs.append(outputs)
         # Return None early for non-primary ranks
         if model.rank != 0:
             return None
 
-        for example, outputs in zip(examples, zip(*all_outputs)):
-            example["model_outputs"] = list(outputs)
-            example["model_answers"] = [self.extract_answer(o) for o in outputs]
+        for example, output in zip(examples, outputs):
+            example["model_output"] = output
+            example["model_answer"] = self.extract_answer(output)
 
         return {"examples": examples}
 
@@ -135,37 +121,14 @@ class OlympiadBenchBenchmark(BaseBenchmark):
             return None
 
         examples = results["examples"]
-        num_questions = len(examples)
-
-        # Calculate accuracy for each repetition
-        all_results = []
-        for i in range(self.n_repeat):
-            solved = sum(
-                [self._check_answer(str(example["answer"]), example["model_answers"][i]) for example in examples]
-            )
-            all_results.append(
-                {
-                    "repetition": i + 1,
-                    "num_total": num_questions,
-                    "num_solved": solved,
-                    "accuracy": solved / num_questions,
-                }
-            )
-
-        # Calculate overall statistics
-        solved_avg = np.mean([result["num_solved"] for result in all_results])
-        accuracy_avg = np.mean([result["accuracy"] for result in all_results])
-        accuracy_std = np.std([result["accuracy"] for result in all_results])
-        accuracy_std_err = np.std([result["accuracy"] for result in all_results]) / np.sqrt(self.n_repeat)
+        total = len(examples)
+        solved = sum(self._check_answer(str(example["answer"]), example["model_answer"]) for example in examples)
 
         results.update(
             {
-                "num_total": num_questions,
-                "solved_avg": solved_avg,
-                "run_stats": all_results,
-                "accuracy_avg": accuracy_avg,
-                "accuracy_std_err": accuracy_std_err,
-                "num_repeat": self.n_repeat,
+                "num_total": total,
+                "num_solved": solved,
+                "accuracy": solved / total,
             }
         )
 
