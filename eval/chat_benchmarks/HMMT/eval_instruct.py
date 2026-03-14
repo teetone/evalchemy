@@ -110,9 +110,10 @@ class HMMTBenchmark(BaseBenchmark):
         if model.rank != 0:
             return None
 
-        for example, outputs in zip(examples, zip(*all_outputs)):
+        for i, (example, outputs) in enumerate(zip(examples, zip(*all_outputs))):
             example["model_outputs"] = list(outputs)
             list_answer = "," in str(example["answer"])
+            self.logger.info(f"Extracting answer for problem {i+1}/{len(examples)}, id={example.get('id', i)}")
             example["model_answers"] = [extract_answer(o, False, True, list_answer)[0] for o in outputs]
             example["label"] = []
         return {"examples": examples}
@@ -131,7 +132,8 @@ class HMMTBenchmark(BaseBenchmark):
         all_results = []
         for i in range(self.n_repeat):
             solved = 0
-            for example in examples:
+            for j, example in enumerate(examples):
+                self.logger.info(f"Scoring repetition {i+1}/{self.n_repeat}, problem {j+1}/{num_questions}")
                 gold_answer, _ = parse_answer(str(example["answer"]))
                 model_answer = example["model_answers"][i]
                 is_correct = check_answers(model_answer, gold_answer)
