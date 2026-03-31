@@ -4,9 +4,9 @@ from typing import Any, Dict, List, Optional
 
 from lm_eval.api.instance import Instance
 from lm_eval.api.model import LM
-from lm_eval.tasks.hendrycks_math.utils import is_equiv, last_boxed_only_string, remove_boxed
 
 from eval.task import BaseBenchmark
+from matharena.parser import check_answers, extract_answer, parse_answer
 
 PROMPT = """Problem: {problem}\nMark your solution with \\boxed\nAnswer:"""
 
@@ -17,8 +17,10 @@ class OlympiadBenchPhysicsBenchmark(BaseBenchmark):
     Link: https://huggingface.co/datasets/Hothan/OlympiadBench
 
     233 text-only, English, open-ended physics competition problems.
-    Follows the same evaluation logic as OlympiadBench (math) using
-    hendrycks_math answer extraction and is_equiv scoring.
+    Uses matharena's sympy-based symbolic equivalence checker (same as HMMT)
+    instead of hendrycks_math's string-based is_equiv, since physics answers
+    often involve scientific notation, decimal/fraction equivalence, and
+    reordered terms that require symbolic comparison.
     """
 
     def __init__(
@@ -72,12 +74,11 @@ class OlympiadBenchPhysicsBenchmark(BaseBenchmark):
 
         for example, output in zip(examples, outputs):
             example["model_output"] = output
-            example["model_answer"] = self.extract_answer(output)
+            # Use matharena's sympy-based answer extraction
+            parsed, _ = extract_answer(output, strict_parsing=False, parse=True)
+            example["model_answer"] = parsed
 
         return {"examples": examples}
-
-    def _check_answer(self, expected: str, predicted: str) -> bool:
-        return is_equiv(expected, predicted)
 
     def evaluate_responses(self, results: Dict[str, Any]) -> Dict[str, float]:
         if results is None:
@@ -85,7 +86,13 @@ class OlympiadBenchPhysicsBenchmark(BaseBenchmark):
 
         examples = results["examples"]
         total = len(examples)
-        solved = sum(self._check_answer(str(example["answer"]), example["model_answer"]) for example in examples)
+        solved = 0
+        for example in examples:
+            gold, _ = parse_answer(str(example["answer"]))
+            model = example["model_answer"]
+            is_correct = check_answers(model, gold)
+            example["is_correct"] = is_correct
+            solved += is_correct
 
         results.update(
             {
@@ -107,10 +114,3 @@ class OlympiadBenchPhysicsBenchmark(BaseBenchmark):
 
         self.logger.info(f"Loaded {len(questions)} questions from {self.data_file}")
         return questions
-
-    def extract_answer(self, output: str) -> str:
-        try:
-            answer = remove_boxed(last_boxed_only_string(output))
-            return answer
-        except:
-            return ""
