@@ -1,9 +1,16 @@
 import json
 import logging
+import os
+import sys
 from typing import Any, Dict, List, Optional
 
 from lm_eval.api.instance import Instance
 from lm_eval.api.model import LM
+
+# matharena lives inside the HMMT benchmark directory
+_hmmt_dir = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "HMMT"))
+if _hmmt_dir not in sys.path:
+    sys.path.insert(0, _hmmt_dir)
 
 from eval.task import BaseBenchmark
 from matharena.parser import check_answers, extract_answer, parse_answer
