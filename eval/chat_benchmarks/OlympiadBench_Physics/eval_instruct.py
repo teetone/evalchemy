@@ -2,20 +2,83 @@ import json
 import logging
 import os
 import sys
+import traceback
+import warnings
 from typing import Any, Dict, List, Optional
 
+import sympy
 from lm_eval.api.instance import Instance
 from lm_eval.api.model import LM
-
-# matharena lives inside the HMMT benchmark directory
-_hmmt_dir = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "HMMT"))
-if _hmmt_dir not in sys.path:
-    sys.path.insert(0, _hmmt_dir)
+from lm_eval.tasks.hendrycks_math.utils import last_boxed_only_string, remove_boxed
+from sympy.parsing.latex import parse_latex
 
 from eval.task import BaseBenchmark
-from matharena.parser import check_answers, extract_answer, parse_answer
 
 PROMPT = """Problem: {problem}\nMark your solution with \\boxed\nAnswer:"""
+
+
+def _parse(x: str) -> list:
+    """Parse a latex string into sympy expressions. Uses LiveBench's approach:
+    lark backend first, then default backend as fallback."""
+    try:
+        import lark
+
+        try:
+            parsed = parse_latex(x, backend="lark")
+        except Exception:
+            try:
+                parsed = parse_latex(x.replace("\\\\", "\\"), backend="lark")
+            except Exception:
+                try:
+                    parsed = parse_latex(x)
+                except Exception:
+                    return []
+
+        if isinstance(parsed, lark.Tree):
+            return parsed.children
+        return [parsed]
+    except ImportError:
+        # lark not installed, use default backend
+        try:
+            return [parse_latex(x)]
+        except Exception:
+            return []
+
+
+def _is_equiv(x1: str, x2: str) -> bool:
+    """Symbolic equivalence check using sympy. Based on LiveBench's is_equiv:
+    parses both strings as latex, computes diff, checks if simplify(diff) == 0
+    or |simplify(diff)| < 0.001."""
+    try:
+        parsed_x1s = _parse(x1)
+        parsed_x2s = _parse(x2)
+
+        if not parsed_x1s or not parsed_x2s:
+            return False
+
+        for p1 in parsed_x1s:
+            for p2 in parsed_x2s:
+                try:
+                    diff = p1 - p2
+                except Exception:
+                    continue
+
+                try:
+                    if sympy.simplify(diff) == 0:
+                        return True
+                except Exception:
+                    pass
+
+                try:
+                    if sympy.Abs(sympy.simplify(diff)) < 0.001:
+                        return True
+                except Exception:
+                    pass
+
+        return False
+    except Exception as e:
+        warnings.warn(f"Failed comparing {x1} and {x2}: {e}")
+        return False
 
 
 class OlympiadBenchPhysicsBenchmark(BaseBenchmark):
@@ -24,10 +87,9 @@ class OlympiadBenchPhysicsBenchmark(BaseBenchmark):
     Link: https://huggingface.co/datasets/Hothan/OlympiadBench
 
     233 text-only, English, open-ended physics competition problems.
-    Uses matharena's sympy-based symbolic equivalence checker (same as HMMT)
-    instead of hendrycks_math's string-based is_equiv, since physics answers
-    often involve scientific notation, decimal/fraction equivalence, and
-    reordered terms that require symbolic comparison.
+    Uses sympy-based symbolic equivalence checker (based on LiveBench's approach)
+    which handles decimal/fraction equivalence, scientific notation, and
+    numerical tolerance (< 0.001 absolute difference after simplification).
     """
 
     def __init__(
@@ -81,11 +143,20 @@ class OlympiadBenchPhysicsBenchmark(BaseBenchmark):
 
         for example, output in zip(examples, outputs):
             example["model_output"] = output
-            # Use matharena's sympy-based answer extraction
-            parsed, _ = extract_answer(output, strict_parsing=False, parse=True)
-            example["model_answer"] = parsed
+            example["model_answer"] = self._extract_answer(output)
 
         return {"examples": examples}
+
+    def _extract_answer(self, output: str) -> str:
+        try:
+            return remove_boxed(last_boxed_only_string(output))
+        except Exception:
+            return ""
+
+    def _check_answer(self, expected: str, predicted: str) -> bool:
+        if not predicted:
+            return False
+        return _is_equiv(expected, predicted)
 
     def evaluate_responses(self, results: Dict[str, Any]) -> Dict[str, float]:
         if results is None:
@@ -93,13 +164,7 @@ class OlympiadBenchPhysicsBenchmark(BaseBenchmark):
 
         examples = results["examples"]
         total = len(examples)
-        solved = 0
-        for example in examples:
-            gold, _ = parse_answer(str(example["answer"]))
-            model = example["model_answer"]
-            is_correct = check_answers(model, gold)
-            example["is_correct"] = is_correct
-            solved += is_correct
+        solved = sum(self._check_answer(str(example["answer"]), example["model_answer"]) for example in examples)
 
         results.update(
             {
