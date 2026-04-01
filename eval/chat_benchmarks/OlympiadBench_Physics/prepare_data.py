@@ -18,7 +18,11 @@ The HF dataset has 18 subsets with the following naming convention:
 
 We want: OE (open-ended) + TO (text-only) + physics + en (English).
 The only matching subset is OE_TO_physics_en_COMP (236 problems).
-3 problems have multiple answers and are skipped.
+
+Multi-part answers come in two forms:
+1. Multiple elements in the final_answer list (3 problems)
+2. A single string with sub-answers delimited by "$ , $" or "$,$"
+Both are split into a list of individual answer parts with $ stripped.
 """
 
 import json
@@ -31,12 +35,26 @@ SUBSET = "OE_TO_physics_en_COMP"
 OUTPUT_PATH = Path(__file__).parent / "data" / "olympiadbench_physics.json"
 
 
-def strip_latex_dollars(s: str) -> str:
-    """Strip surrounding $ delimiters from a LaTeX answer string."""
-    s = s.strip()
-    if s.startswith("$") and s.endswith("$"):
-        s = s[1:-1].strip()
-    return s
+def split_multi_part_answer(s: str) -> list[str]:
+    """Split a multi-part answer string on '$ , $' or '$,$' delimiters.
+
+    Each part has surrounding $ stripped. Single-part answers return a
+    one-element list.
+    """
+    # Split on $ , $ or $,$ (with optional whitespace)
+    parts = re.split(r"\$\s*,\s*\$", s)
+    cleaned = []
+    for p in parts:
+        p = p.strip()
+        # Strip leading/trailing $ that remain after splitting
+        if p.startswith("$"):
+            p = p[1:]
+        if p.endswith("$"):
+            p = p[:-1]
+        p = p.strip()
+        if p:
+            cleaned.append(p)
+    return cleaned
 
 
 def main():
@@ -44,27 +62,25 @@ def main():
     print(f"Loaded {len(ds)} problems from {SUBSET}")
 
     problems = []
-    skipped = 0
     for row in ds:
         final_answer = row["final_answer"]
-        if len(final_answer) != 1:
-            print(f"Skipping problem (multi-answer, {len(final_answer)} answers): {final_answer}")
-            skipped += 1
-            continue
 
-        answer = strip_latex_dollars(final_answer[0])
+        # Collect all answer parts from all elements in the list
+        all_parts = []
+        for ans_str in final_answer:
+            all_parts.extend(split_multi_part_answer(ans_str))
 
         problems.append({
             "id": len(problems),
             "problem": row["question"],
             "solution": row.get("solution", ""),
-            "answer": answer,
+            "answers": all_parts,
             "answer_type": row.get("answer_type", ""),
             "subfield": "Physics",
         })
 
-    print(f"Skipped {skipped} multi-answer problems")
-    print(f"Total problems: {len(problems)}")
+    multi_part = sum(1 for p in problems if len(p["answers"]) > 1)
+    print(f"Total problems: {len(problems)} ({multi_part} multi-part)")
 
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(OUTPUT_PATH, "w") as f:
