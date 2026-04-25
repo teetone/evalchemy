@@ -1,0 +1,5 @@
+from eval.chat_benchmarks.OlympiadBench.eval_instruct import OlympiadBenchBenchmark
+from eval.chat_benchmarks.ttc_utils import make_ttc_benchmark
+
+OlympiadBenchTTCBenchmark = make_ttc_benchmark(OlympiadBenchBenchmark)
+OlympiadBenchTTCBenchmark.__module__ = __name__

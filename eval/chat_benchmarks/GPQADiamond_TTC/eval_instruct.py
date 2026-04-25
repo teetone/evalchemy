@@ -1,0 +1,5 @@
+from eval.chat_benchmarks.GPQADiamond.eval_instruct import GPQADiamondBenchmark
+from eval.chat_benchmarks.ttc_utils import make_ttc_benchmark
+
+GPQADiamondTTCBenchmark = make_ttc_benchmark(GPQADiamondBenchmark)
+GPQADiamondTTCBenchmark.__module__ = __name__

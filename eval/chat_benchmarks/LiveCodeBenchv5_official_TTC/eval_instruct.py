@@ -1,0 +1,5 @@
+from eval.chat_benchmarks.LiveCodeBenchv5_official.eval_instruct import LiveCodeBenchV5OfficialBenchmark
+from eval.chat_benchmarks.ttc_utils import make_ttc_benchmark
+
+LiveCodeBenchV5OfficialTTCBenchmark = make_ttc_benchmark(LiveCodeBenchV5OfficialBenchmark)
+LiveCodeBenchV5OfficialTTCBenchmark.__module__ = __name__
