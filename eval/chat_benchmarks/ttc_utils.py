@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 DEFAULT_N_CANDIDATES = 8
-N_VALIDATION_VOTES = 3
+N_VALIDATION_VOTES = 5
 VAL_TEMPERATURE = 0.6
 VAL_TOP_P = 0.95
 VAL_MAX_TOKENS = 32768
@@ -147,6 +147,54 @@ def clean_inferred_question(text: str) -> str:
 # UQ validation via evalchemy model interface
 # =============================================================================
 
+def _generate_n_candidates(
+    model: LM,
+    templated_prompt: str,
+    n: int,
+    max_new_tokens: int,
+    temperature: float = 0.7,
+) -> list[str]:
+    """Generate n diverse candidates for a prompt using vLLM's native n parameter.
+
+    Calls model.model.generate() directly with SamplingParams(n=n) to get
+    n completions in a single request. This shares the prompt KV cache and
+    guarantees diversity via independent temperature sampling.
+
+    Args:
+        model: lm-eval LM model (must be a vLLM model with model.model attribute)
+        templated_prompt: the prompt string (already chat-templated)
+        n: number of candidates to generate
+        max_new_tokens: max generation length
+        temperature: sampling temperature (default 0.7)
+
+    Returns:
+        list of n generated text strings
+    """
+    from vllm import SamplingParams
+
+    sampling_params = SamplingParams(
+        n=n,
+        temperature=temperature,
+        max_tokens=max_new_tokens,
+        skip_special_tokens=False,
+        spaces_between_special_tokens=False,
+    )
+
+    # Tokenize the prompt the same way lm-eval does
+    prompt_tokens = model.tok_encode(templated_prompt)
+
+    # Call vLLM directly
+    from vllm import TokensPrompt
+    outputs = model.model.generate(
+        [TokensPrompt(prompt_token_ids=prompt_tokens)],
+        sampling_params=sampling_params,
+        use_tqdm=False,
+    )
+
+    # Extract all n completions from the single request
+    return [output.text for output in outputs[0].outputs]
+
+
 def _generate_validation(
     model: LM,
     benchmark: BaseBenchmark,
@@ -154,49 +202,29 @@ def _generate_validation(
     num_outputs: int,
     seed: list[int],
 ) -> list[list[str]]:
-    """Generate validation responses through evalchemy's compute() interface.
+    """Generate validation responses using vLLM's native n parameter.
+
+    Single vLLM call per prompt with n=num_outputs for diverse votes.
 
     Args:
         model: evalchemy LM model
-        benchmark: BaseBenchmark instance (for _prepare_messages and compute)
+        benchmark: BaseBenchmark instance (for _prepare_messages)
         prompts: list of prompt strings
         num_outputs: number of outputs per prompt (1 for single, N_VALIDATION_VOTES for votes)
-        seed: base seed list
+        seed: base seed list (unused — diversity comes from temperature sampling via n)
 
     Returns:
         list[list[str]] — outer list per prompt, inner list per output
     """
     all_results: list[list[str]] = []
 
-    for vote_idx in range(num_outputs):
-        vote_seed = [s + vote_idx + 100 for s in seed]  # offset to avoid collision with generation seeds
-        instances = []
-        for idx, prompt_text in enumerate(prompts):
-            messages = [{"role": "user", "content": prompt_text}]
-            templated = benchmark._prepare_messages(messages, model)
-            instance = Instance(
-                "generate_until",
-                {},
-                (
-                    templated,
-                    {
-                        "do_sample": True,
-                        "max_new_tokens": VAL_MAX_TOKENS,
-                        "temperature": VAL_TEMPERATURE,
-                        "seed": vote_seed,
-                    },
-                ),
-                idx,
-            )
-            instances.append(instance)
-
-        outputs = benchmark.compute(model, instances)
-
-        if not all_results:
-            all_results = [[o] for o in outputs]
-        else:
-            for i, o in enumerate(outputs):
-                all_results[i].append(o)
+    for prompt_text in prompts:
+        messages = [{"role": "user", "content": prompt_text}]
+        templated = benchmark._prepare_messages(messages, model)
+        outputs = _generate_n_candidates(
+            model, templated, num_outputs, VAL_MAX_TOKENS, VAL_TEMPERATURE,
+        )
+        all_results.append(outputs)
 
     return all_results
 
@@ -321,104 +349,92 @@ def make_ttc_benchmark(
             if hasattr(self, "n_repeat"):
                 self._original_n_repeat = self.n_repeat
                 self.n_repeat = 1
-            # Storage for prompts captured during parent's generation
-            self._captured_prompts: Dict[int, str] = {}
-            self._capturing: bool = False
 
-        def compute(self, model: LM, inputs: List[Instance], do_slice: bool = True) -> List[str]:
-            """Wrapper around parent compute that captures templated prompts during generation."""
-            if self._capturing:
-                for inst in inputs:
-                    if isinstance(inst.args, tuple) and len(inst.args) >= 1:
-                        self._captured_prompts[inst.idx] = inst.args[0]
-            return super().compute(model, inputs, do_slice)
+        def _build_messages(self, example: dict) -> list[dict]:
+            """Build chat messages for a single example.
+
+            Default: uses module-level PROMPT.format(problem=...).
+            Override in thin wrappers for benchmarks with complex prompt logic.
+            """
+            import sys
+            mod = sys.modules.get(original_class.__module__)
+            prompt_template = getattr(mod, "PROMPT", None) if mod else None
+            if prompt_template is None:
+                raise NotImplementedError(
+                    f"No PROMPT found in {original_class.__module__}. "
+                    f"Override _build_messages() in the TTC wrapper."
+                )
+            # Most benchmarks use PROMPT.format(problem=...) where the problem text
+            # comes from different field names ("problem", "question", "Question").
+            # AMC23 uses example["question"] but the template variable is {problem}.
+            question_text = _get_question_text(example)
+
+            # GPQADiamond uses problem + options
+            if "multiple_choice_string" in example:
+                content = prompt_template.format(
+                    problem=question_text,
+                    options=example["multiple_choice_string"],
+                )
+            else:
+                content = prompt_template.format(problem=question_text)
+
+            return [{"role": "user", "content": content}]
 
         def generate_responses(self, model: LM) -> Dict[str, Any]:
-            """Generate N candidates per problem, UQ-filter, return in parent's format."""
+            """Generate N candidates per problem via single vLLM call, UQ-filter."""
 
-            # Step 1: Run parent's generate_responses (with n_repeat=1)
-            # This produces one output per example using the benchmark's exact prompt logic.
-            # Our compute() wrapper captures the templated prompt for each example idx.
-            self._captured_prompts.clear()
-            self._capturing = True
-            parent_result = original_class.generate_responses(self, model)
-            self._capturing = False
+            examples = self.load_questions()
+
+            # Some benchmarks do preprocessing in generate_responses before building prompts.
+            # Call _preprocess_examples to handle that (e.g., GPQADiamond shuffles options).
+            self._preprocess_examples(examples)
 
             if model.rank != 0:
                 return None
 
-            # Step 2: For each example, generate N-1 more candidates and UQ-filter
-            examples = parent_result["examples"]
-
             for prob_idx, example in enumerate(examples):
                 question_text = _get_question_text(example)
 
-                # Get the first candidate from parent's generation
-                if "model_outputs" in example:
-                    first_output = example["model_outputs"][0]
-                elif "model_output" in example:
-                    first_output = example["model_output"]
-                else:
-                    continue
+                # Build prompt using benchmark-specific logic
+                messages = self._build_messages(example)
+                templated = self._prepare_messages(messages, model)
 
-                candidates = [first_output]
-
-                # Reuse the exact templated prompt captured during parent's generation
-                templated_messages = self._captured_prompts.get(prob_idx)
-                if templated_messages is None:
-                    logger.warning(f"No captured prompt for example {prob_idx}, skipping TTC")
-                    continue
-
-                # Generate N-1 more candidates with different seeds
-                for j in range(1, self.n_candidates):
-                    seed = [s + j for s in self.seed]
-                    instance = Instance(
-                        "generate_until",
-                        example,
-                        (
-                            templated_messages,
-                            {
-                                "do_sample": False,
-                                "max_new_tokens": self.max_new_tokens,
-                                "temperature": 0.7,
-                                "seed": seed,
-                            },
-                        ),
-                        0,
-                    )
-                    outputs = super().compute(model, [instance])
-                    candidates.append(outputs[0])
+                # Single vLLM call: generate all N candidates with n=N
+                candidates = _generate_n_candidates(
+                    model, templated, self.n_candidates, self.max_new_tokens,
+                )
 
                 # UQ filter: pick first valid candidate
                 selected, sel_idx, ttc_info = uq_filter_candidates(
                     model, self, question_text, candidates, self.seed,
                 )
 
-                # Replace the example's output with the selected candidate
-                # Match the format the parent's evaluate_responses expects.
-                # Re-extract the answer using the same method the parent used
-                # for the first candidate.
-                if "model_outputs" in example:
-                    example["model_outputs"] = [selected]
-                    if "model_answers" in example:
-                        # Re-extract answer the same way parent did for the first output
-                        example["model_answers"] = [_re_extract_answer(self, selected, example)]
-                elif "model_output" in example:
-                    example["model_output"] = selected
-                    if "model_answer" in example:
-                        example["model_answer"] = _re_extract_answer(self, selected, example)
-
+                # Store in the format parent's evaluate_responses expects
+                example["model_outputs"] = [selected]
+                example["model_answers"] = [_re_extract_answer(self, selected, example)]
+                example["model_output"] = selected
+                example["model_answer"] = _re_extract_answer(self, selected, example)
                 example["ttc_info"] = ttc_info
                 example["all_candidates"] = candidates
 
+                n_unique = len(set(candidates))
                 if (prob_idx + 1) % 5 == 0 or prob_idx == 0:
                     logger.info(
                         f"TTC [{prob_idx + 1}/{len(examples)}] "
+                        f"{n_unique}/{len(candidates)} unique candidates, "
                         f"selected candidate {sel_idx}/{self.n_candidates} "
                         f"via {ttc_info['selection_method']}"
                     )
 
-            return parent_result
+            return {"examples": examples}
+
+        def _preprocess_examples(self, examples: list[dict]) -> None:
+            """Hook for benchmark-specific preprocessing before prompt building.
+
+            Default is no-op. Override for benchmarks that need preprocessing
+            (e.g., GPQADiamond shuffles multiple choice options).
+            """
+            pass
 
         # evaluate_responses is NOT overridden — uses parent's exact scoring logic
 
