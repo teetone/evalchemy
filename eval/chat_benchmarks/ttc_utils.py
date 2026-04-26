@@ -247,8 +247,10 @@ def uq_filter_candidates(
             model, benchmark, [compare_prompt], N_VALIDATION_VOTES, seed
         )
         if not check_unanimous(vote_outputs[0]):
+            logger.debug(f"  Candidate {idx}: FAILED cycle consistency")
             continue
         info["n_passed_cycle"] += 1
+        logger.debug(f"  Candidate {idx}: passed cycle consistency")
 
         # Stage 2: Factual error check
         factual_prompt = FACTUAL_ERROR_PROMPT.format(question=question, answer=answer_text)
@@ -256,8 +258,10 @@ def uq_filter_candidates(
             model, benchmark, [factual_prompt], N_VALIDATION_VOTES, seed
         )
         if not check_unanimous(vote_outputs[0]):
+            logger.debug(f"  Candidate {idx}: FAILED factual check")
             continue
         info["n_passed_factual"] += 1
+        logger.debug(f"  Candidate {idx}: passed factual check")
 
         # Stage 3: Total correctness
         correctness_prompt = TOTAL_CORRECTNESS_PROMPT.format(question=question, answer=answer_text)
@@ -265,17 +269,25 @@ def uq_filter_candidates(
             model, benchmark, [correctness_prompt], N_VALIDATION_VOTES, seed
         )
         if not check_unanimous(vote_outputs[0]):
+            logger.debug(f"  Candidate {idx}: FAILED correctness check")
             continue
         info["n_passed_correctness"] += 1
 
         # All 3 stages passed — select this candidate
         info["selected_index"] = idx
         info["selection_method"] = "uq_validated"
+        logger.info(f"  UQ VALIDATED: candidate {idx}/{len(candidates)} passed all 3 stages")
         return candidate, idx, info
 
     # No candidate passed all stages — fall back to first candidate
     info["selected_index"] = 0
     info["selection_method"] = "fallback"
+    logger.warning(
+        f"  UQ FALLBACK: no candidate passed all 3 stages "
+        f"(cycle={info['n_passed_cycle']}, factual={info['n_passed_factual']}, "
+        f"correctness={info['n_passed_correctness']} out of {len(candidates)} candidates). "
+        f"Using first candidate."
+    )
     return candidates[0], 0, info
 
 
@@ -435,15 +447,21 @@ def _re_extract_answer(benchmark: BaseBenchmark, output: str, example: dict):
     # and use the same extraction.
     class_name = type(benchmark).__name__
 
-    # Multiple choice: GPQADiamond, HLE
-    if "GPQADiamond" in class_name or "HLE" in class_name:
+    # Multiple choice: GPQADiamond
+    if "GPQADiamond" in class_name:
         from eval.chat_benchmarks.GPQADiamond.testing_utils import get_multiple_choice_answer
+        return get_multiple_choice_answer(output)
+
+    # Multiple choice: HLE (has its own testing_utils)
+    if "HLE" in class_name:
+        from eval.chat_benchmarks.HLE.testing_utils import get_multiple_choice_answer
         return get_multiple_choice_answer(output)
 
     # HMMT uses matharena's extract_answer
     if "HMMT" in class_name:
         from matharena.parser import extract_answer
-        return extract_answer(output, False, True, list_answer=False)[0]
+        list_answer = "," in str(example.get("answer", ""))
+        return extract_answer(output, False, True, list_answer)[0]
 
     # OlympiadBench_Physics extracts boxed answers
     if "OlympiadBenchPhysics" in class_name:
@@ -452,7 +470,7 @@ def _re_extract_answer(benchmark: BaseBenchmark, output: str, example: dict):
 
     # LiveCodeBench extracts code blocks
     if "LiveCodeBench" in class_name:
-        from eval.chat_benchmarks.LiveCodeBench.livecodebench_utils import has_code
+        from eval.chat_benchmarks.LiveCodeBench.eval_instruct import has_code
         return has_code(output)
 
     # Fallback: return raw output
