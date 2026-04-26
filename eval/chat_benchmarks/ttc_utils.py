@@ -383,13 +383,18 @@ def make_ttc_benchmark(
                 )
 
                 # Replace the example's output with the selected candidate
-                # Match the format the parent's evaluate_responses expects
+                # Match the format the parent's evaluate_responses expects.
+                # Re-extract the answer using the same method the parent used
+                # for the first candidate.
                 if "model_outputs" in example:
                     example["model_outputs"] = [selected]
-                    example["model_answers"] = [self.extract_answer(selected)]
+                    if "model_answers" in example:
+                        # Re-extract answer the same way parent did for the first output
+                        example["model_answers"] = [_re_extract_answer(self, selected, example)]
                 elif "model_output" in example:
                     example["model_output"] = selected
-                    example["model_answer"] = self.extract_answer(selected)
+                    if "model_answer" in example:
+                        example["model_answer"] = _re_extract_answer(self, selected, example)
 
                 example["ttc_info"] = ttc_info
                 example["all_candidates"] = candidates
@@ -414,6 +419,44 @@ def make_ttc_benchmark(
     #   ClassName.__module__ = __name__
 
     return TTCBenchmark
+
+
+def _re_extract_answer(benchmark: BaseBenchmark, output: str, example: dict):
+    """Re-extract the model answer from output using the benchmark's extraction method.
+
+    Checks for extract_answer() method first (math benchmarks like AIME, MATH500).
+    Otherwise, looks at the original model_answers format to determine the extraction method.
+    """
+    # Math benchmarks define extract_answer (AIME24, AIME25, AIME26, AMC23, MATH500, OlympiadBench, JEEBench)
+    if hasattr(benchmark, "extract_answer"):
+        return benchmark.extract_answer(output)
+
+    # For benchmarks without extract_answer, inspect what the parent produced
+    # and use the same extraction.
+    class_name = type(benchmark).__name__
+
+    # Multiple choice: GPQADiamond, HLE
+    if "GPQADiamond" in class_name or "HLE" in class_name:
+        from eval.chat_benchmarks.GPQADiamond.testing_utils import get_multiple_choice_answer
+        return get_multiple_choice_answer(output)
+
+    # HMMT uses matharena's extract_answer
+    if "HMMT" in class_name:
+        from matharena.parser import extract_answer
+        return extract_answer(output, False, True, list_answer=False)[0]
+
+    # OlympiadBench_Physics extracts boxed answers
+    if "OlympiadBenchPhysics" in class_name:
+        from eval.chat_benchmarks.OlympiadBench_Physics.eval_instruct import _extract_all_boxed, _deduplicate
+        return _deduplicate(_extract_all_boxed(output))
+
+    # LiveCodeBench extracts code blocks
+    if "LiveCodeBench" in class_name:
+        from eval.chat_benchmarks.LiveCodeBench.livecodebench_utils import has_code
+        return has_code(output)
+
+    # Fallback: return raw output
+    return output
 
 
 def _get_question_text(example: dict) -> str:
