@@ -183,6 +183,19 @@ def _generate_n_candidates(
     # Tokenize the prompt the same way lm-eval does
     prompt_tokens = model.tok_encode(templated_prompt)
 
+    # Truncate prompt if it exceeds max_model_len - max_new_tokens,
+    # same as lm-eval's generate_until does (left truncation).
+    # Use model.max_length property (same as lm-eval line 619).
+    max_model_len = getattr(model, 'max_length', None)
+    if max_model_len:
+        max_ctx_len = max_model_len - max_new_tokens
+        if len(prompt_tokens) > max_ctx_len:
+            logger.warning(
+                f"Prompt length {len(prompt_tokens)} exceeds max context "
+                f"({max_ctx_len}={max_model_len}-{max_new_tokens}). Truncating."
+            )
+            prompt_tokens = prompt_tokens[-max_ctx_len:]
+
     # Call vLLM directly
     from vllm import TokensPrompt
     outputs = model.model.generate(
