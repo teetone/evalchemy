@@ -348,10 +348,24 @@ def make_ttc_benchmark(
     - Sets n_repeat=1 so the parent's evaluate_responses() scores a single run
     - Output format matches what the parent expects
 
+    Note: Adds the original benchmark's directory to sys.path so that local imports
+    (e.g., matharena in HMMT, utils in JEEBench) resolve correctly when the TTC
+    wrapper is loaded from a different directory.
+
     Args:
         original_class: The original benchmark class to wrap
         default_n_candidates: Default number of candidates per problem
     """
+    import os
+    import sys
+
+    # Add the original benchmark's directory to sys.path so local imports
+    # (matharena, utils, run_judge_results, etc.) resolve correctly.
+    original_module_file = sys.modules[original_class.__module__].__file__
+    if original_module_file:
+        original_dir = os.path.dirname(os.path.abspath(original_module_file))
+        if original_dir not in sys.path:
+            sys.path.insert(0, original_dir)
 
     class TTCBenchmark(original_class):
 
