@@ -441,6 +441,9 @@ def make_ttc_benchmark(
                 example["model_answers"] = [_re_extract_answer(self, selected, example)]
                 example["model_output"] = selected
                 example["model_answer"] = _re_extract_answer(self, selected, example)
+                # HMMT's evaluate_responses appends to example["label"]
+                if "label" not in example:
+                    example["label"] = []
                 example["ttc_info"] = ttc_info
                 example["all_candidates"] = candidates
 
