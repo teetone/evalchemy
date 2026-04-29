@@ -1,3 +1,7 @@
+import os, sys
+# Add HLE dir to sys.path so run_judge_results and testing_utils are importable
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "HLE"))
+
 from eval.chat_benchmarks.HLE.eval_instruct import HLESubsetBenchmark, format_message
 from eval.chat_benchmarks.ttc_utils import make_ttc_benchmark
 
