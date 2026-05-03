@@ -43,36 +43,58 @@ def _get_gcs_fs():
 
 
 def _save_checkpoint(examples: list[dict], last_idx: int) -> None:
-    """Save TTC progress to GCS using gcsfs."""
+    """Save TTC progress to GCS using gcsfs. Fails loudly if save is broken."""
     checkpoint_path = _get_checkpoint_path()
     if not checkpoint_path:
         return
-    try:
-        checkpoint = {"last_idx": last_idx, "num_examples": len(examples)}
-        completed = []
-        for i, ex in enumerate(examples):
-            if "model_output" in ex:
-                problem_id = ex.get("id", ex.get("problem", ex.get("question", ex.get("Question", ""))))
-                if isinstance(problem_id, str) and len(problem_id) > 1000:
-                    problem_id = problem_id[:1000]
-                completed.append({
-                    "idx": i,
-                    "problem_id": str(problem_id),
-                    "model_output": ex["model_output"],
-                    "model_answer": ex.get("model_answer", ""),
-                    "model_outputs": ex.get("model_outputs", []),
-                    "model_answers": ex.get("model_answers", []),
-                    "ttc_info": ex.get("ttc_info", {}),
-                })
-        checkpoint["completed"] = completed
 
-        fs = _get_gcs_fs()
-        gcs_path = checkpoint_path.replace("gs://", "")
-        with fs.open(gcs_path, "w") as f:
-            json.dump(checkpoint, f)
-        logger.info(f"  Checkpoint saved: {last_idx + 1} problems ({checkpoint_path})")
-    except Exception as e:
-        logger.warning(f"  Checkpoint save failed: {e}")
+    checkpoint = {"last_idx": last_idx, "num_examples": len(examples)}
+    completed = []
+    for i, ex in enumerate(examples):
+        if "model_output" in ex:
+            problem_id = ex.get("id", ex.get("problem", ex.get("question", ex.get("Question", ""))))
+            if isinstance(problem_id, str) and len(problem_id) > 1000:
+                problem_id = problem_id[:1000]
+            completed.append({
+                "idx": i,
+                "problem_id": str(problem_id),
+                "model_output": ex["model_output"],
+                "model_answer": ex.get("model_answer", ""),
+                "model_outputs": ex.get("model_outputs", []),
+                "model_answers": ex.get("model_answers", []),
+                "ttc_info": ex.get("ttc_info", {}),
+            })
+    checkpoint["completed"] = completed
+
+    # Sanity check: we should have completed problems to save
+    expected_completed = last_idx + 1
+    if len(completed) != expected_completed:
+        raise RuntimeError(
+            f"Checkpoint sanity check failed: expected {expected_completed} completed problems "
+            f"but found {len(completed)}. Examples missing 'model_output': "
+            f"{[i for i in range(expected_completed) if 'model_output' not in examples[i]]}"
+        )
+
+    checkpoint_json = json.dumps(checkpoint)
+    logger.info(f"  Checkpoint: {len(completed)} completed, {len(checkpoint_json)} bytes")
+
+    # Write to GCS
+    fs = _get_gcs_fs()
+    gcs_path = checkpoint_path.replace("gs://", "")
+    with fs.open(gcs_path, "w") as f:
+        f.write(checkpoint_json)
+
+    # Verify: read back and check completed count matches
+    with fs.open(gcs_path, "r") as f:
+        verify = json.load(f)
+    verified_count = len(verify.get("completed", []))
+    if verified_count != len(completed):
+        raise RuntimeError(
+            f"Checkpoint verification failed: wrote {len(completed)} completed "
+            f"but read back {verified_count}. File may be corrupted or truncated."
+        )
+
+    logger.info(f"  Checkpoint saved and verified: {last_idx + 1} problems ({checkpoint_path})")
 
 
 def _load_checkpoint(examples: list[dict]) -> int:
