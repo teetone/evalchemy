@@ -7,8 +7,12 @@ Ports validation logic from virtual-world-data/sdg/validation.py and sdg/prompts
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import re
+import subprocess
+import tempfile
 from typing import Any, Dict, List, Optional, Type
 
 from lm_eval.api.instance import Instance
@@ -17,6 +21,114 @@ from lm_eval.api.model import LM
 from eval.task import BaseBenchmark
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# GCS checkpointing for TTC (survives preemption)
+# =============================================================================
+
+CHECKPOINT_INTERVAL = 5  # save every N problems
+
+
+def _get_checkpoint_path() -> str | None:
+    """Get GCS checkpoint path from environment variable."""
+    output_path = os.environ.get("EVALCHEMY_OUTPUT_PATH", "")
+    if not output_path or not output_path.startswith("gs://"):
+        return None
+    return os.path.join(output_path, ".ttc_checkpoint.json")
+
+
+def _save_checkpoint(examples: list[dict], last_idx: int) -> None:
+    """Save TTC progress to GCS."""
+    checkpoint_path = _get_checkpoint_path()
+    if not checkpoint_path:
+        return
+    try:
+        checkpoint = {"last_idx": last_idx, "num_examples": len(examples)}
+        # Save examples that have model_output set (completed problems)
+        completed = []
+        for i, ex in enumerate(examples):
+            if "model_output" in ex:
+                # Store problem identity for verification on restore
+                problem_id = ex.get("id", ex.get("problem", ex.get("question", ex.get("Question", ""))))
+                if isinstance(problem_id, str) and len(problem_id) > 1000:
+                    problem_id = problem_id[:1000]
+                completed.append({
+                    "idx": i,
+                    "problem_id": str(problem_id),
+                    "model_output": ex["model_output"],
+                    "model_answer": ex.get("model_answer", ""),
+                    "model_outputs": ex.get("model_outputs", []),
+                    "model_answers": ex.get("model_answers", []),
+                    "ttc_info": ex.get("ttc_info", {}),
+                })
+        checkpoint["completed"] = completed
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(checkpoint, f)
+            tmp_path = f.name
+        subprocess.run(
+            ["gsutil", "-q", "cp", tmp_path, checkpoint_path],
+            capture_output=True, timeout=30,
+        )
+        os.unlink(tmp_path)
+        logger.info(f"  Checkpoint saved: {last_idx + 1} problems ({checkpoint_path})")
+    except Exception as e:
+        logger.warning(f"  Checkpoint save failed: {e}")
+
+
+def _load_checkpoint(examples: list[dict]) -> int:
+    """Load TTC checkpoint from GCS. Returns start_idx (0 if no checkpoint)."""
+    checkpoint_path = _get_checkpoint_path()
+    if not checkpoint_path:
+        return 0
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            tmp_path = f.name
+        result = subprocess.run(
+            ["gsutil", "-q", "cp", checkpoint_path, tmp_path],
+            capture_output=True, timeout=30,
+        )
+        if result.returncode != 0:
+            return 0
+
+        with open(tmp_path) as f:
+            checkpoint = json.load(f)
+        os.unlink(tmp_path)
+
+        if checkpoint.get("num_examples") != len(examples):
+            logger.warning(f"  Checkpoint mismatch: {checkpoint.get('num_examples')} vs {len(examples)} examples. Ignoring.")
+            return 0
+
+        # Restore completed problems (verify problem identity matches)
+        restored = 0
+        for item in checkpoint.get("completed", []):
+            idx = item["idx"]
+            if idx < len(examples):
+                # Verify problem identity
+                ex = examples[idx]
+                expected_id = str(ex.get("id", ex.get("problem", ex.get("question", ex.get("Question", "")))))
+                if isinstance(expected_id, str) and len(expected_id) > 1000:
+                    expected_id = expected_id[:1000]
+                if item.get("problem_id") and item["problem_id"] != expected_id:
+                    logger.warning(f"  Checkpoint mismatch at idx {idx}: expected '{expected_id[:50]}' got '{item['problem_id'][:50]}'. Skipping.")
+                    continue
+                ex["model_output"] = item["model_output"]
+                ex["model_answer"] = item.get("model_answer", "")
+                if item.get("model_outputs"):
+                    ex["model_outputs"] = item["model_outputs"]
+                if item.get("model_answers"):
+                    ex["model_answers"] = item["model_answers"]
+                if item.get("ttc_info"):
+                    ex["ttc_info"] = item["ttc_info"]
+                restored += 1
+
+        start_idx = checkpoint.get("last_idx", -1) + 1
+        logger.info(f"  Checkpoint loaded: resuming from problem {start_idx}, {restored} problems restored")
+        return start_idx
+    except Exception as e:
+        logger.warning(f"  Checkpoint load failed: {e}")
+        return 0
 
 # =============================================================================
 # Config defaults
@@ -419,7 +531,16 @@ def make_ttc_benchmark(
             if model.rank != 0:
                 return None
 
+            # Load checkpoint if available (resume after preemption)
+            start_idx = _load_checkpoint(examples)
+
             for prob_idx, example in enumerate(examples):
+                # Skip already-completed problems (from checkpoint)
+                if prob_idx < start_idx:
+                    continue
+                if "model_output" in example:
+                    continue  # already restored from checkpoint
+
                 question_text = _get_question_text(example)
 
                 # Build prompt using benchmark-specific logic
@@ -455,6 +576,10 @@ def make_ttc_benchmark(
                         f"selected candidate {sel_idx}/{self.n_candidates} "
                         f"via {ttc_info['selection_method']}"
                     )
+
+                # Checkpoint to GCS every N problems (survives preemption)
+                if (prob_idx + 1) % CHECKPOINT_INTERVAL == 0:
+                    _save_checkpoint(examples, prob_idx)
 
             return {"examples": examples}
 
