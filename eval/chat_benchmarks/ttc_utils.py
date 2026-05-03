@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 # GCS checkpointing for TTC (survives preemption)
 # =============================================================================
 
-CHECKPOINT_INTERVAL = 5  # save every N problems
+CHECKPOINT_INTERVAL = 1  # save every problem
 
 
 def _get_checkpoint_path() -> str | None:
@@ -309,18 +309,17 @@ def _generate_n_candidates(
     # Tokenize the prompt the same way lm-eval does
     prompt_tokens = model.tok_encode(templated_prompt)
 
-    # Truncate prompt if it exceeds max_model_len - max_new_tokens,
-    # same as lm-eval's generate_until does (left truncation).
-    # Use model.max_length property (same as lm-eval line 619).
+    # Truncate prompt if it exceeds max_model_len (left truncation).
+    # Unlike lm-eval which reserves space for max_new_tokens, we only
+    # truncate if the prompt itself exceeds the model's context window.
+    # vLLM will stop at EOS regardless of max_tokens setting.
     max_model_len = getattr(model, 'max_length', None)
-    if max_model_len:
-        max_ctx_len = max_model_len - max_new_tokens
-        if len(prompt_tokens) > max_ctx_len:
-            logger.warning(
-                f"Prompt length {len(prompt_tokens)} exceeds max context "
-                f"({max_ctx_len}={max_model_len}-{max_new_tokens}). Truncating."
-            )
-            prompt_tokens = prompt_tokens[-max_ctx_len:]
+    if max_model_len and len(prompt_tokens) > max_model_len:
+        logger.warning(
+            f"Prompt length {len(prompt_tokens)} exceeds max_model_len "
+            f"({max_model_len}). Truncating."
+        )
+        prompt_tokens = prompt_tokens[-max_model_len:]
 
     # Call vLLM directly
     from vllm import TokensPrompt
