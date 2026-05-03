@@ -11,8 +11,6 @@ import json
 import logging
 import os
 import re
-import subprocess
-import tempfile
 from typing import Any, Dict, List, Optional, Type
 
 from lm_eval.api.instance import Instance
@@ -38,18 +36,22 @@ def _get_checkpoint_path() -> str | None:
     return os.path.join(output_path, ".ttc_checkpoint.json")
 
 
+def _get_gcs_fs():
+    """Get a gcsfs filesystem instance."""
+    import gcsfs
+    return gcsfs.GCSFileSystem()
+
+
 def _save_checkpoint(examples: list[dict], last_idx: int) -> None:
-    """Save TTC progress to GCS."""
+    """Save TTC progress to GCS using gcsfs."""
     checkpoint_path = _get_checkpoint_path()
     if not checkpoint_path:
         return
     try:
         checkpoint = {"last_idx": last_idx, "num_examples": len(examples)}
-        # Save examples that have model_output set (completed problems)
         completed = []
         for i, ex in enumerate(examples):
             if "model_output" in ex:
-                # Store problem identity for verification on restore
                 problem_id = ex.get("id", ex.get("problem", ex.get("question", ex.get("Question", ""))))
                 if isinstance(problem_id, str) and len(problem_id) > 1000:
                     problem_id = problem_id[:1000]
@@ -64,37 +66,28 @@ def _save_checkpoint(examples: list[dict], last_idx: int) -> None:
                 })
         checkpoint["completed"] = completed
 
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        fs = _get_gcs_fs()
+        gcs_path = checkpoint_path.replace("gs://", "")
+        with fs.open(gcs_path, "w") as f:
             json.dump(checkpoint, f)
-            tmp_path = f.name
-        subprocess.run(
-            ["gsutil", "-q", "cp", tmp_path, checkpoint_path],
-            capture_output=True, timeout=30,
-        )
-        os.unlink(tmp_path)
         logger.info(f"  Checkpoint saved: {last_idx + 1} problems ({checkpoint_path})")
     except Exception as e:
         logger.warning(f"  Checkpoint save failed: {e}")
 
 
 def _load_checkpoint(examples: list[dict]) -> int:
-    """Load TTC checkpoint from GCS. Returns start_idx (0 if no checkpoint)."""
+    """Load TTC checkpoint from GCS using gcsfs. Returns start_idx (0 if no checkpoint)."""
     checkpoint_path = _get_checkpoint_path()
     if not checkpoint_path:
         return 0
     try:
-        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
-            tmp_path = f.name
-        result = subprocess.run(
-            ["gsutil", "-q", "cp", checkpoint_path, tmp_path],
-            capture_output=True, timeout=30,
-        )
-        if result.returncode != 0:
+        fs = _get_gcs_fs()
+        gcs_path = checkpoint_path.replace("gs://", "")
+        if not fs.exists(gcs_path):
             return 0
 
-        with open(tmp_path) as f:
+        with fs.open(gcs_path, "r") as f:
             checkpoint = json.load(f)
-        os.unlink(tmp_path)
 
         if checkpoint.get("num_examples") != len(examples):
             logger.warning(f"  Checkpoint mismatch: {checkpoint.get('num_examples')} vs {len(examples)} examples. Ignoring.")
@@ -105,7 +98,6 @@ def _load_checkpoint(examples: list[dict]) -> int:
         for item in checkpoint.get("completed", []):
             idx = item["idx"]
             if idx < len(examples):
-                # Verify problem identity
                 ex = examples[idx]
                 expected_id = str(ex.get("id", ex.get("problem", ex.get("question", ex.get("Question", "")))))
                 if isinstance(expected_id, str) and len(expected_id) > 1000:
