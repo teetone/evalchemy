@@ -75,7 +75,7 @@ def _save_checkpoint(examples: list[dict], last_idx: int) -> None:
             f"{[i for i in range(expected_completed) if 'model_output' not in examples[i]]}"
         )
 
-    checkpoint_json = json.dumps(checkpoint)
+    checkpoint_json = json.dumps(checkpoint, default=str)
     logger.info(f"  Checkpoint: {len(completed)} completed, {len(checkpoint_json)} bytes")
 
     # Write to GCS
