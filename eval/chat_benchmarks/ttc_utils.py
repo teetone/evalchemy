@@ -537,6 +537,10 @@ def make_ttc_benchmark(
 
             examples = self.load_questions()
 
+            # Convert to list of dicts if needed (HF Dataset rows are read-only)
+            if not isinstance(examples, list):
+                examples = [dict(ex) for ex in examples]
+
             # Some benchmarks do preprocessing in generate_responses before building prompts.
             # Call _preprocess_examples to handle that (e.g., GPQADiamond shuffles options).
             self._preprocess_examples(examples)
