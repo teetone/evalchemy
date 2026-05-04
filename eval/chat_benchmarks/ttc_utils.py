@@ -135,6 +135,8 @@ def _load_checkpoint(examples: list[dict]) -> int:
                     ex["model_answers"] = item["model_answers"]
                 if item.get("ttc_info"):
                     ex["ttc_info"] = item["ttc_info"]
+                if "label" not in ex:
+                    ex["label"] = []
                 restored += 1
 
         start_idx = checkpoint.get("last_idx", -1) + 1
