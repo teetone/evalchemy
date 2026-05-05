@@ -553,6 +553,16 @@ def make_ttc_benchmark(
             # Load checkpoint if available (resume after preemption)
             start_idx = _load_checkpoint(examples)
 
+            # Re-extract answers for checkpoint-restored examples.
+            # Checkpoint serializes model_answer as string (via default=str),
+            # but grading (e.g. HMMT's check_answers) needs parsed objects.
+            if start_idx > 0:
+                for i in range(start_idx):
+                    if "model_output" in examples[i]:
+                        examples[i]["model_answer"] = _re_extract_answer(self, examples[i]["model_output"], examples[i])
+                        examples[i]["model_answers"] = [examples[i]["model_answer"]]
+                logger.info(f"  Re-extracted answers for {start_idx} checkpoint-restored problems")
+
             for prob_idx, example in enumerate(examples):
                 # Skip already-completed problems (from checkpoint)
                 if prob_idx < start_idx:
