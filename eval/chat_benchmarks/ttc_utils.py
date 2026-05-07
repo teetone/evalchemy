@@ -316,7 +316,7 @@ def _generate_n_candidates(
     # truncate if the prompt itself exceeds the model's context window.
     # vLLM will stop at EOS regardless of max_tokens setting.
     max_model_len = getattr(model, 'max_length', None)
-    if max_model_len and len(prompt_tokens) > max_model_len:
+    if max_model_len and len(prompt_tokens) >= max_model_len:
         logger.warning(
             f"Prompt length {len(prompt_tokens)} exceeds max_model_len "
             f"({max_model_len}). Truncating."
