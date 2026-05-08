@@ -318,10 +318,10 @@ def _generate_n_candidates(
     max_model_len = getattr(model, 'max_length', None)
     if max_model_len and len(prompt_tokens) >= max_model_len:
         logger.warning(
-            f"Prompt length {len(prompt_tokens)} exceeds max_model_len "
-            f"({max_model_len}). Truncating."
+            f"Prompt length {len(prompt_tokens)} >= max_model_len "
+            f"({max_model_len}). Skipping — cannot generate output."
         )
-        prompt_tokens = prompt_tokens[-max_model_len:]
+        return [""]
 
     # Call vLLM directly
     from vllm import TokensPrompt
