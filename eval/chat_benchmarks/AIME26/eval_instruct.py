@@ -7,49 +7,45 @@ from lm_eval.api.instance import Instance
 from lm_eval.api.model import LM
 from lm_eval.tasks.hendrycks_math.utils import is_equiv, last_boxed_only_string, remove_boxed
 
-from datasets import load_dataset
 from eval.task import BaseBenchmark
 
-from matharena.parser import extract_answer, parse_answer, check_answers, WarningType
-from matharena.possible_issues import check_number_proximity_any_order, check_all_numbers, check_output_length
-
 # Modified version of hendrycks_math with additional instruction to mark the solution with \\boxed
-PROMPT = """Problem: {problem}\nPlease reason step by step, and put your final answer within \\boxed{{}}.\nAnswer:"""
+# https://github.com/mlfoundations/evalchemy/blob/e70a45e41cb2ada273d6bb98e75dba303ec31f8b/eval/chat_benchmarks/AMC23/eval_instruct.py#L15
+PROMPT = """Problem: {problem}\nMark your solution with \\boxed\nAnswer:"""
 
 
-class HMMTBenchmark(BaseBenchmark):
+class AIME26Benchmark(BaseBenchmark):
     """
-    HMMT Benchmark for evaluating the math reasoning of LLMs.
-    https://huggingface.co/datasets/MathArena/hmmt_feb_2025
+    AIME26 Benchmark for evaluating the math reasoning of LLMs.
+    Link: https://huggingface.co/datasets/math-ai/aime26
 
     Follows the evaluation logic of hendrycks_math answer extraction.
     """
 
     def __init__(
         self,
-        dataset_name: str = "MathArena/hmmt_feb_2025",
+        data_file: str = "eval/chat_benchmarks/AIME26/data/aime26.json",
         debug: bool = False,
-        max_tokens: int = 32768,
         seed: List[int] = [0, 1234, 1234, 1234],
+        max_tokens: int = 32768,
         logger: Optional[logging.Logger] = None,
         system_instruction: Optional[str] = None,
     ):
         """
-        Initialize HMMT benchmark.
+        Initialize AIME26 benchmark.
 
         Args:
-            dataset_name: Dataset containing the HMMT dataset (id, answer)
+            data_file: File containing the AIME26 dataset (id, problem, solution, answer)
             debug: If set, only evaluate on 2 examples
             seed: Random seed for reproducibility. Default is [0, 1234, 1234, 1234] for lm-eval-harness.
             logger: Optional logger instance
-            system_instruction: Optional system instruction for the model
         """
         super().__init__(logger=logger, system_instruction=system_instruction)
-        self.dataset_name = dataset_name
+        self.data_file = data_file
         self.debug = debug
         self.max_new_tokens = max_tokens
         self.seed = seed
-        self.n_repeat = 10
+        self.n_repeat = 1
 
     def generate_responses(self, model: LM) -> Dict[str, Any]:
         """
@@ -103,19 +99,17 @@ class HMMTBenchmark(BaseBenchmark):
                 all_instances.append(instance)
 
             # Generate model responses
-            self.logger.info("Generating responses for HMMT...")
+            self.logger.info("Generating responses for AIME26...")
             outputs = self.compute(model, all_instances)
             all_outputs.append(outputs)
         # Return None early for non-primary ranks
         if model.rank != 0:
             return None
 
-        for i, (example, outputs) in enumerate(zip(examples, zip(*all_outputs))):
+        for example, outputs in zip(examples, zip(*all_outputs)):
             example["model_outputs"] = list(outputs)
-            list_answer = "," in str(example["answer"])
-            self.logger.info(f"Extracting answer for problem {i+1}/{len(examples)}, id={example.get('id', i)}")
-            example["model_answers"] = [extract_answer(o, False, True, list_answer)[0] for o in outputs]
-            example["label"] = []
+            example["model_answers"] = [self.extract_answer(o) for o in outputs]
+
         return {"examples": examples}
 
     def evaluate_responses(self, results: Dict[str, Any]) -> Dict[str, float]:
@@ -131,14 +125,7 @@ class HMMTBenchmark(BaseBenchmark):
         # Calculate accuracy for each repetition
         all_results = []
         for i in range(self.n_repeat):
-            solved = 0
-            for j, example in enumerate(examples):
-                self.logger.info(f"Scoring repetition {i+1}/{self.n_repeat}, problem {j+1}/{num_questions}")
-                gold_answer, _ = parse_answer(str(example["answer"]))
-                model_answer = example["model_answers"][i]
-                is_correct = check_answers(model_answer, gold_answer)
-                example["label"].append(is_correct)
-                solved += is_correct
+            solved = sum([is_equiv(str(example["answer"]), example["model_answers"][i]) for example in examples])
             all_results.append(
                 {
                     "repetition": i + 1,
@@ -168,12 +155,30 @@ class HMMTBenchmark(BaseBenchmark):
         return results
 
     def load_questions(self) -> List[Dict[str, str]]:
-        """Load HMMT questions from the data file."""
-        dataset = load_dataset(self.dataset_name, split="train")
+        """Load AIME26 questions from the data file."""
+        with open(self.data_file, "r") as f:
+            questions = [json.loads(x) for x in f]
 
         if self.debug:
             questions = questions[:2]
             self.logger.info(f"Debug mode enabled. Using only {len(questions)} questions.")
- 
-        questions = [dict(example) for example in dataset]
+
+        self.logger.info(f"Loaded {len(questions)} questions from {self.data_file}")
         return questions
+
+    def extract_answer(self, output: str) -> str:
+        """Extract the final answer from a model-generated solution, which is expected to be in the format of \boxed{answer}.
+
+        Uses the same logic as hendrycks_math.
+
+        Args:
+            output (str): Model-generated solution text
+
+        Returns:
+            str: Extracted final answer. Returns empty string if no answer found in \boxed.
+        """
+        try:
+            answer = remove_boxed(last_boxed_only_string(output))
+            return answer
+        except:
+            return ""

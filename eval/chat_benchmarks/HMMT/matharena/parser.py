@@ -263,6 +263,7 @@ def check_answers(ans1, ans2):
             return False
         return ans1.equals(ans2)
     except Exception as e:
+        logger.warning(f"check_answers failed: {e}, ans1={str(ans1)[:100]}, ans2={str(ans2)[:100]}")
         return False
 
 
@@ -386,23 +387,25 @@ class ParsePrimitive(ParseObject):
             latex_str = re.sub(r"((?<![a-zA-Z])[a-zA-Z]{1,2}(?![a-zA-Z]))(?=\d)", r"\1*", latex_str)
             latex_str = re.sub(r"\{([^{}]*)\}", lambda m: "[" + m.group(1).replace(",", ", ") + "]", latex_str)
 
+            logger.debug(f"Attempting sympy.sympify on: {latex_str[:200]}")
             string = sympy.sympify(
                 latex_str, locals={"binomial": sympy.binomial, "pi": sympy.pi, "E": sympy.E, "I": sympy.I}
             )
         except Exception as e:
-            # logger.warning(f"Couldn't parse {string} with standard LaTeX commands")
+            logger.info(f"sympy.sympify failed for input: {latex_str[:200]}, error: {e}")
 
             try:
                 string_no_eq = string
                 if "=" in string_no_eq:
                     # rfind is used to remove the last occurence of "="
                     string_no_eq = string_no_eq[string_no_eq.rfind("=") + 1 :]
+                logger.debug(f"Attempting latex2sympy_fixed on: {string_no_eq[:200]}")
                 float_val = float(N(latex2sympy_fixed(string_no_eq), 101))
                 if float_val.is_integer() or float("inf") == float_val or float("-inf") == float_val:
                     return int(N(latex2sympy_fixed(string_no_eq), 50001)), warning  # important for large ints
                 return float_val, warning
             except Exception as e:
-                logger.warning(f"Error: Custom parsing error {e}, {string_no_eq}")
+                logger.warning(f"Error: Custom parsing error {e}, input: {string_no_eq[:200]}")
                 warning = max(warning, WarningType.MAJOR)
                 return None, warning
 

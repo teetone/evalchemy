@@ -4,6 +4,7 @@ import logging
 import os
 import random
 import sys
+import traceback
 from abc import ABC, abstractmethod
 from itertools import islice
 from typing import Any, Callable, Dict, List, Optional, Type, Union
@@ -351,14 +352,14 @@ def evaluate(
 
     # Run evaluations
     for task_name in valid_tasks:
-        try:
-            benchmark = task_manager.get_benchmark(task_name)
-            if benchmark:
-                logger.info(f"Evaluating {task_name}")
+        benchmark = task_manager.get_benchmark(task_name)
+        if benchmark:
+            logger.info(f"Evaluating {task_name}")
+            try:
                 results["results"][task_name] = benchmark.run_benchmark(lm)
-        except Exception as e:
-            logger.error(f"Error evaluating {task_name}: {str(e)}")
-            results["results"][task_name] = {"error": str(e)}
+            except Exception as e:
+                logger.error(f"Error evaluating {task_name}: {str(e)}\n{traceback.format_exc()}")
+                raise
 
     return results
 

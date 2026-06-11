@@ -2,6 +2,7 @@ import getpass
 import json
 import re
 import subprocess
+import sys
 import time
 import uuid
 from contextlib import contextmanager
@@ -140,6 +141,14 @@ class DCEvaluationTracker:
             try:
                 eval_logger.info("Saving results aggregated")
 
+                # Some math benchmarks (e.g. HMMT) produce answers with extremely
+                # large integers (like (26!)^3 or 2025!) whose string representations
+                # exceed Python's default 4300-digit safety limit. json.dumps calls
+                # str() on these integers during serialization, which raises ValueError.
+                # Without this override the results file is never written and the eval
+                # silently appears to succeed (exit code 0) but produces no output.
+                sys.set_int_max_str_digits(0)
+
                 # calculate cumulative hash for each task - only if samples are provided
                 task_hashes = {}
                 if samples:
@@ -166,9 +175,11 @@ class DCEvaluationTracker:
 
                 eval_logger.info(f"Wrote aggregated results to: {file_results_aggregated}")
 
-            except Exception as e:
-                eval_logger.warning("Could not save results aggregated")
-                eval_logger.info(repr(e))
+            except Exception:
+                # Fail fast: if results can't be saved, the eval must not exit 0
+                # with no output file — that causes silent data loss downstream.
+                eval_logger.exception("Failed to save results aggregated")
+                raise
         else:
             eval_logger.info("Output path not provided, skipping saving results aggregated")
 
